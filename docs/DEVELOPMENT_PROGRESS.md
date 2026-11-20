@@ -207,10 +207,29 @@ XAMPP on Windows:
 1. Start **Apache** and **MySQL** from the XAMPP control panel.
 2. The project lives at `C:\xampp\htdocs\project-mgnt-sys`; open `http://localhost/project-mgnt-sys/`.
 3. If the schema is missing, run `php database/install.php` from the project folder
-   (or visit `database/install.php?confirm=install`). The installer recreates the schema and demo data.
+   (or visit `database/install.php?confirm=install`). The installer is non-destructive by default:
+   it creates only missing tables and seeds demo data only when the `users` table is empty.
+   Use `php database/install.php --fresh` for a deliberate local rebuild that drops and recreates tables,
+   `--no-seed` for schema only, and `--check` to verify the connection without changing anything.
 4. Database credentials default to `127.0.0.1`, user `root`, empty password, database `urims`;
-   override in `config/database.local.php` or with `URIMS_DB_HOST`, `URIMS_DB_NAME`,
-   `URIMS_DB_USER`, `URIMS_DB_PASS`, `URIMS_DB_PORT`.
+   override in `config/database.local.php` or with the environment variables `DB_HOST`, `DB_PORT`,
+   `DB_NAME`, `DB_USER`, `DB_PASS` (documented in `.env.example`).
+
+### Deploying on Railway
+
+- Add a MySQL service and set `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASS` on the
+  application service to the MySQL service values (`MYSQLHOST`, `MYSQLPORT`, `MYSQLDATABASE`,
+  `MYSQLUSER`, `MYSQLPASSWORD`). The MySQL plugin names are also read automatically when the
+  `DB_*` names are absent, and `DATABASE_URL` / `MYSQL_URL` are parsed as a fallback.
+- `railway.json` starts the app with `bash start.sh`, which runs the idempotent installer and then
+  serves the project with PHP's built-in server on `$PORT`. Serving from that entrypoint matters:
+  PHP-FPM hosts commonly use `clear_env = yes`, which strips injected variables from the worker
+  environment and makes `getenv('DB_HOST')` return `false` even though the variable exists.
+- Connection settings are resolved from `$_ENV`, `$_SERVER`, `getenv()` and an optional `.env`
+  file, so any of those transports works.
+- `start.sh` never aborts the container on a database error; the setup screen then reports the exact
+  PDO error, the host/port/database/user it used, the credential source, and which variables were
+  detected. Set `URIMS_SKIP_DB_BOOTSTRAP=1` to skip the automatic install step.
 
 Without Apache: `php -S 127.0.0.1:8090 -t .` from the project root.
 

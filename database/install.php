@@ -7,21 +7,38 @@ declare(strict_types=1);
  * Recreates the database schema and loads demonstration data.
  */
 
-if (PHP_SAPI !== 'cli' && ($_GET['confirm'] ?? '') !== 'install') {
+$urimsArgs  = $_SERVER['argv'] ?? [];
+$isCli      = PHP_SAPI === 'cli';
+$urimsFlags = [];
+foreach ($urimsArgs as $urimsArg) {
+    if (is_string($urimsArg) && str_starts_with($urimsArg, '--')) {
+        $urimsFlags[] = substr($urimsArg, 2);
+    }
+}
+
+$fresh     = in_array('fresh', $urimsFlags, true) || (!$isCli && ($_GET['fresh'] ?? '') === '1');
+$noSeed    = in_array('no-seed', $urimsFlags, true) || (!$isCli && ($_GET['seed'] ?? '') === '0');
+$checkOnly = in_array('check', $urimsFlags, true);
+
+if (!$isCli && ($_GET['confirm'] ?? '') !== 'install') {
     http_response_code(403);
     exit('Installer is protected. Run "php database/install.php" from the terminal, or append ?confirm=install.');
 }
 
 define('ROOT_PATH', dirname(__DIR__));
 require_once ROOT_PATH . '/config/config.php';
+require_once __DIR__ . '/bootstrap.php';
 
 $config = db_config();
-$isCli  = PHP_SAPI === 'cli';
 
 function out(string $line, string $type = 'info'): void
 {
     $prefix = ['info' => '  ', 'ok' => '  ✓ ', 'warn' => '  ! '][$type] ?? '  ';
-    echo $prefix . $line . PHP_EOL;
+    if (PHP_SAPI === 'cli') {
+        echo $prefix . $line . PHP_EOL;
+        return;
+    }
+    echo htmlspecialchars($prefix . $line, ENT_QUOTES, 'UTF-8') . "\n";
 }
 
 if (!$isCli) {
@@ -29,30 +46,46 @@ if (!$isCli) {
 }
 
 try {
-    $pdo = new PDO(
-        'mysql:host=' . $config['host'] . ';port=' . $config['port'] . ';charset=utf8mb4',
-        (string) $config['user'],
-        (string) $config['pass'],
-        [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]
-    );
+    $pdo = db();
     out('Connected to MySQL at ' . $config['host'] . ':' . $config['port'], 'ok');
+    out('Database "' . $config['name'] . '" selected (credentials: ' . ($config['source'] ?? 'unknown') . ')', 'ok');
 
-    $pdo->exec('CREATE DATABASE IF NOT EXISTS `' . $config['name'] . '` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci');
-    $pdo->exec('USE `' . $config['name'] . '`');
-    out('Database "' . $config['name'] . '" ready', 'ok');
-
-    $schema = file_get_contents(__DIR__ . '/schema.sql');
-    if ($schema === false) {
-        throw new RuntimeException('schema.sql could not be read.');
+    if ($checkOnly) {
+        $missing = urims_missing_tables($pdo);
+        out(
+            $missing === []
+                ? 'Connection OK. All ' . count(urims_required_tables()) . ' required tables are present.'
+                : 'Connection OK, but ' . count($missing) . ' table(s) are missing: ' . implode(', ', $missing),
+            $missing === [] ? 'ok' : 'warn'
+        );
+        if (!$isCli) {
+            echo '</pre>';
+        }
+        exit($missing === [] ? 0 : 1);
     }
-    $pdo->exec($schema);
-    out('Schema installed', 'ok');
+
+    $result = urims_run_schema($pdo, $fresh);
+    out(
+        'Schema applied: ' . $result['executed'] . ' statement(s) executed, ' . $result['skipped']
+        . ' skipped (' . ($result['fresh'] ? 'fresh rebuild' : 'existing tables preserved') . ')',
+        'ok'
+    );
+
+    $missing = urims_missing_tables($pdo);
+    if ($missing !== []) {
+        throw new RuntimeException('Schema incomplete after install; still missing: ' . implode(', ', $missing));
+    }
 } catch (Throwable $e) {
     out('Database error: ' . $e->getMessage(), 'warn');
     if (!$isCli) {
         echo '</pre>';
     }
     exit(1);
+}
+
+$seedDemoData = !$noSeed && urims_seed_is_needed($pdo);
+if (!$seedDemoData) {
+    out('Existing data detected; demo records were not re-seeded', 'ok');
 }
 
 /* ---------------------------------------------------------------
@@ -93,6 +126,7 @@ function hash_password(string $plain): string
 /* ---------------------------------------------------------------
  | Faculties, departments, programmes, calendar
  --------------------------------------------------------------- */
+if ($seedDemoData) {
 $faculties = [
     ['FST', 'Faculty of Science & Technology', 'Dr. Neema Kessy', 'fst@kiut.ac.tz', '+255 22 555 0101', 'Computing, engineering, mathematics and applied sciences research.'],
     ['FBM', 'Faculty of Business & Management', 'Dr. Joseph Mbwana', 'fbm@kiut.ac.tz', '+255 22 555 0102', 'Business, finance, entrepreneurship and management research.'],
@@ -694,7 +728,17 @@ if (!is_dir(ROOT_PATH . '/uploads')) {
 }
 
 out('Notifications, audit trail and settings seeded', 'ok');
-out('Installation complete. Sign in with admin@kiut.ac.tz / Admin@123', 'ok');
+} // end of demo data seeding
+
+if (!is_dir(ROOT_PATH . '/uploads')) {
+    mkdir(ROOT_PATH . '/uploads', 0775, true);
+}
+
+if ($seedDemoData) {
+    out('Installation complete. Sign in with admin@kiut.ac.tz / Admin@123', 'ok');
+} else {
+    out('Schema ready. Existing data and accounts were preserved.', 'ok');
+}
 
 if (!$isCli) {
     echo '</pre>';

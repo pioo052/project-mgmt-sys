@@ -26,11 +26,11 @@ function db_config(): array
     }
 
     $envMap = [
-        'host' => 'URIMS_DB_HOST',
-        'port' => 'URIMS_DB_PORT',
-        'name' => 'URIMS_DB_NAME',
-        'user' => 'URIMS_DB_USER',
-        'pass' => 'URIMS_DB_PASS',
+        'host' => 'DB_HOST',
+        'port' => 'DB_PORT',
+        'name' => 'DB_NAME',
+        'user' => 'DB_USER',
+        'pass' => 'DB_PASS',
     ];
     foreach ($envMap as $key => $env) {
         $value = getenv($env);

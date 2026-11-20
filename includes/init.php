@@ -71,9 +71,26 @@ http_response_code(503);
             <li><strong>User:</strong> <code><?= e($urimsConnection['user']) ?></code>
                 (<?= $urimsConnection['password_set'] ? 'password set' : 'no password set' ?>)</li>
             <li><strong>Credentials source:</strong> <?= e($urimsConnection['source']) ?></li>
+            <li><strong>Host source:</strong> <?= e($urimsConnection['host_source'] === 'default' ? 'NOT CONFIGURED (built-in 127.0.0.1 fallback)' : $urimsConnection['host_source']) ?></li>
             <li><strong>PDO MySQL driver:</strong> <?= $urimsConnection['pdo_mysql'] ? 'loaded' : 'NOT loaded' ?>
                 (PHP <?= e($urimsConnection['php']) ?>)</li>
         </ul>
+
+        <?php if ($urimsConnection['host_source'] === 'default'): ?>
+            <p class="setup-code" style="white-space:pre-wrap;word-break:break-word;border-left:3px solid #d97706">
+                <strong>DB_HOST is not set on this service.</strong>
+                The database host therefore fell back to <code><?= e($urimsConnection['host'] . ':' . $urimsConnection['port']) ?></code>,
+                which points at this container, not at the MySQL service.
+                <?php if ($urimsConnection['candidates'] !== []): ?>
+                    URIMS also probed the usual co-located hostnames
+                    (<code><?= e(implode(', ', $urimsConnection['candidates'])) ?></code>) and none answered.
+                <?php endif; ?>
+                Add these on the <em>application</em> service, not on the MySQL service:
+                <code>DB_HOST</code> = <code>${{MySQL.MYSQLHOST}}</code> and
+                <code>DB_PORT</code> = <code>${{MySQL.MYSQLPORT}}</code>
+                (or paste the literal values from the MySQL service's Variables tab).
+            </p>
+        <?php endif; ?>
 
         <?php if ($urimsMissingTables !== []): ?>
             <p class="text-sm text-secondary"><strong>Missing tables:</strong>

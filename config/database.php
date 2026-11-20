@@ -187,12 +187,20 @@ function db_config(): array
         'source'  => 'built-in defaults (XAMPP: 127.0.0.1, root, urims)',
     ];
 
+    /* Tracks whether the host came from real configuration. When it did not, the
+       host is just the built-in 127.0.0.1 default and a platform deployment must
+       not be silently guessed at. */
+    $hostSource = 'default';
+
     $local = __DIR__ . '/database.local.php';
     if (is_file($local)) {
         $override = require $local;
         if (is_array($override)) {
             $config = array_merge($config, $override);
             $config['source'] = 'config/database.local.php';
+            if (isset($override['host']) && trim((string) $override['host']) !== '') {
+                $hostSource = 'config/database.local.php';
+            }
         }
     }
 
@@ -212,6 +220,9 @@ function db_config(): array
             if ($fromUrl !== []) {
                 $config = array_merge($config, $fromUrl);
                 $config['source'] = '.env (' . $urlKey . ')';
+                if (isset($fromUrl['host'])) {
+                    $hostSource = '.env (' . $urlKey . ')';
+                }
             }
         }
     }
@@ -222,6 +233,9 @@ function db_config(): array
             if ($value !== null) {
                 $config[$key] = $value;
                 $config['source'] = '.env (' . $name . ')';
+                if ($key === 'host') {
+                    $hostSource = '.env (' . $name . ')';
+                }
                 break;
             }
         }
@@ -243,6 +257,9 @@ function db_config(): array
             if ($fromUrl !== []) {
                 $config = array_merge($config, $fromUrl);
                 $config['source'] = 'environment (' . $urlKey . ')';
+                if (isset($fromUrl['host'])) {
+                    $hostSource = 'environment (' . $urlKey . ')';
+                }
             }
         }
     }
@@ -253,6 +270,9 @@ function db_config(): array
             if ($value !== null) {
                 $config[$key] = $value;
                 $config['source'] = 'environment (' . $name . ')';
+                if ($key === 'host') {
+                    $hostSource = 'environment (' . $name . ')';
+                }
                 break;
             }
         }
@@ -273,12 +293,52 @@ function db_config(): array
         }
     }
 
+    $config['host_source'] = $hostSource;
+
     return $config;
 }
 
-function db_dsn(bool $withDatabase = true): string
+/** True when the host is the built-in localhost fallback, not configured input. */
+function db_host_is_default(?array $c = null): bool
 {
-    $c = db_config();
+    $c = $c ?? db_config();
+
+    return ($c['host_source'] ?? 'default') === 'default';
+}
+
+/**
+ * Hostnames of a MySQL/MariaDB service running beside the app, in the order
+ * they are worth trying. Used only when no host was configured at all, so a
+ * platform deployment whose DB_HOST variable was never added can still connect.
+ */
+function db_internal_host_candidates(): array
+{
+    $candidates = [
+        'mysql.railway.internal',
+        'MySQL.railway.internal',
+        'mariadb.railway.internal',
+        'mysql',
+        'db',
+        'database',
+        'mariadb',
+    ];
+
+    return array_values(array_unique($candidates));
+}
+
+/** Cheap DNS check so unreachable candidates do not each cost a TCP timeout. */
+function db_host_resolves(string $host): bool
+{
+    if ($host === '' || filter_var($host, FILTER_VALIDATE_IP) !== false) {
+        return $host !== '';
+    }
+
+    return gethostbyname($host) !== $host;
+}
+
+function db_dsn(bool $withDatabase = true, ?array $c = null): string
+{
+    $c = $c ?? db_config();
     $dsn = "mysql:host={$c['host']};port={$c['port']};charset={$c['charset']}";
     if ($withDatabase) {
         $dsn = "mysql:host={$c['host']};port={$c['port']};dbname={$c['name']};charset={$c['charset']}";
@@ -325,6 +385,15 @@ function db_failure(Throwable $e, array $c = []): RuntimeException
         $message .= ' ' . $hints[$code];
     }
 
+    if (db_host_is_default($c) && in_array($code, [2002, 2005, 1130], true)) {
+        $message .= ' DB_HOST is not set on this service, so URIMS fell back to the local'
+            . ' loopback address ' . $c['host'] . ':' . $c['port'] . ' and tried co-located MySQL hostnames.'
+            . ' Fix: open the application service → Variables and add DB_HOST = the MySQL host'
+            . ' (copy MYSQLHOST from the MySQL service, or use the reference ${{MySQL.MYSQLHOST}})'
+            . ' plus DB_PORT = the MySQL port (MYSQLPORT / ${{MySQL.MYSQLPORT}}). The internal'
+            . ' hostname ends in .railway.internal and is not reachable from a browser.';
+    }
+
     return new RuntimeException($message, 0, $e);
 }
 
@@ -341,7 +410,7 @@ function db_create_database(array $c, array $options): PDO
     }
 
     try {
-        $server = new PDO(db_dsn(false), (string) $c['user'], (string) $c['pass'], $options);
+        $server = new PDO(db_dsn(false, $c), (string) $c['user'], (string) $c['pass'], $options);
     } catch (PDOException $e) {
         throw db_failure($e, $c);
     }
@@ -359,7 +428,7 @@ function db_create_database(array $c, array $options): PDO
     }
 
     try {
-        return new PDO(db_dsn(true), (string) $c['user'], (string) $c['pass'], $options);
+        return new PDO(db_dsn(true, $c), (string) $c['user'], (string) $c['pass'], $options);
     } catch (PDOException $e) {
         throw db_failure($e, $c);
     }
@@ -385,15 +454,58 @@ function db(): PDO
     ];
 
     try {
-        $pdo = new PDO(db_dsn(true), (string) $c['user'], (string) $c['pass'], $options);
+        $pdo = new PDO(db_dsn(true, $c), (string) $c['user'], (string) $c['pass'], $options);
+
+        return $pdo;
     } catch (PDOException $e) {
-        if (db_error_number($e) !== 1049) {
+        if (db_error_number($e) === 1049) {
+            $pdo = db_create_database($c, $options);
+
+            return $pdo;
+        }
+
+        /* No host was configured at all: probe for a MySQL service that shares
+           this container network, then report the original failure if none works. */
+        if (!db_host_is_default($c)) {
             throw db_failure($e, $c);
         }
-        $pdo = db_create_database($c, $options);
-    }
 
-    return $pdo;
+        /* Probes must not stall the page: a resolvable but wrong host would
+           otherwise cost a full connect timeout each. */
+        $probeOptions = $options;
+        $probeOptions[PDO::ATTR_TIMEOUT] = 3;
+
+        $lastError = $e;
+        foreach (db_internal_host_candidates() as $host) {
+            if (!db_host_resolves($host)) {
+                continue;
+            }
+
+            $candidate = $c;
+            $candidate['host'] = $host;
+            $candidate['source'] = $c['source'] . ' + host auto-detected as ' . $host;
+
+            try {
+                $pdo = new PDO(db_dsn(true, $candidate), (string) $candidate['user'], (string) $candidate['pass'], $probeOptions);
+
+                return $pdo;
+            } catch (PDOException $candidateError) {
+                if (db_error_number($candidateError) === 1049) {
+                    try {
+                        $pdo = db_create_database($candidate, $options);
+
+                        return $pdo;
+                    } catch (Throwable $createError) {
+                        $lastError = $createError instanceof PDOException ? $createError : $candidateError;
+                        continue;
+                    }
+                }
+                $lastError = $candidateError;
+            }
+        }
+
+        throw db_failure($lastError, $c);
+    }
 }
 
 /** Non-throwing probe used by the installer and the setup screen. */
@@ -419,10 +531,12 @@ function db_connection_summary(): array
         'name'         => (string) $c['name'],
         'user'         => (string) $c['user'],
         'source'       => (string) ($c['source'] ?? 'unknown'),
+        'host_source'  => (string) ($c['host_source'] ?? 'default'),
         'password_set' => (string) $c['pass'] !== '',
         'pdo_mysql'    => extension_loaded('pdo_mysql'),
         'php'          => PHP_VERSION,
         'env'          => db_env_report(),
+        'candidates'   => db_host_is_default($c) ? db_internal_host_candidates() : [],
     ];
 }
 
